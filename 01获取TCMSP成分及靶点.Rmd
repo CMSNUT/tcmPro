@@ -10,7 +10,7 @@ knitr::opts_chunk$set(echo = TRUE)
 
 ## 获取 TCMSP 成分及其靶点数据
 
-### 定义函数 `getTCMSpInfos`
+## 定义函数 `gget_tcmsp_info`
 
 ```{r}
 #' 获取 TCMSP 数据库中的药材成分及其靶点数据
@@ -29,8 +29,8 @@ get_tcmsp_info <- function(herbs, token) {
   required_packages <- c("purrr", "httr", "rvest", "jsonlite", "dplyr", "stringr")
   sapply(required_packages, function(pkg) {
     if (!require(pkg, character.only = TRUE)) {
-      install.packages(pkg)
-      library(pkg, character.only = TRUE)
+      install.packages(pkg, character.only = TRUE)
+      library(pkg)
     }
   })
   
@@ -106,10 +106,14 @@ get_tcmsp_info <- function(herbs, token) {
           
           # 添加药材名称作为标识列
           if (!is.null(herb_mols)) {
-            herb_mols$herb_name <- .x
+            herb_mols <- herb_mols %>% 
+              mutate(herb_name = .x) %>%  
+              relocate(herb_name, .before = 1)  # 将"药材"列移至第一列
           }
           if (!is.null(herb_mols_targets)) {
-            herb_mols_targets$herb_name <- .x
+            herb_mols_targets <- herb_mols_targets %>% 
+              mutate(herb_name = .x) %>%  
+              relocate(herb_name, .before = 1)  # 将"药材"列移至第一列
           }
           
           # 返回结构化结果
@@ -120,8 +124,298 @@ get_tcmsp_info <- function(herbs, token) {
           ))
       }
     }
-
   }) # map 结束
+  
+  # 4. 数据合并与输出 ----------------------------------------------------------
+  # 合并所有有效成分数据
+  all_mols <- map_dfr(results, "mols") %>% 
+    filter(!is.na(molecule_ID))  # 按实际ID列名调整
+  
+  # 合并所有靶点数据
+  all_targets <- map_dfr(results, "targets") %>% 
+    filter(!is.na(target_ID))
+  
+  # 返回结果
+  invisible(list(
+    mols = all_mols,
+    targets = all_targets
+  ))
 }
 
 ```
+
+## 示例: 黄芪真武汤 黄芪 附子 白术 赤芍 茯苓 生姜
+
+```{r}
+# 包加载
+
+if (!require("purrr", quietly = TRUE)) install.packages("purrr")
+if (!require("dplyr", quietly = TRUE)) install.packages("dplyr")
+if (!require("stringr", quietly = TRUE)) install.packages("stringr")
+if (!require("svDialogs", quietly = TRUE)) install.packages("svDialogs")
+
+library(purrr)
+library(dplyr)
+library(stringr)
+library(svDialogs)
+
+
+# # 弹窗输入文本
+# user_name <- dlg_input("请输入您的姓名：", default = "匿名")$res
+# 
+# # 弹窗输入数值（需转换类型）
+# user_age <- as.numeric(dlg_input("请输入年龄：")$res)
+# 
+# # 弹窗选择文件
+# file_path <- dlg_open(title = "选择数据文件")$res
+# 
+# # 输出结果
+# cat("姓名:", user_name, "\n年龄:", user_age, "\n文件路径:", file_path)
+
+herbs <- dlg_input("输入中药材的中文名称，不同药材之间用空格或逗号或分号隔开", default = "")$res
+herbs <- herbs %>%
+  str_split(pattern = "[, ，;； ]+") %>%  # 分割
+  unlist() %>%                       # 转为向量
+  str_trim() %>%                     # 去除首尾空格
+  .[. != ""]                         # 移除空字符串
+
+token <- dlg_input("输入TCMSP的token", default = "")$res
+
+tcmsp_info <- get_tcmsp_info(herbs, token)
+
+mols <- tcmsp_info$mols
+targets <- tcmsp_info$targets
+```
+
+## 统计结果
+
+### 每种药材的活性成分数量(ob>=30,dl>=0.18)
+
+```{r}
+# 筛选活性成分（ob>=30且dl>=0.18）
+active_mols <- mols[mols$ob >= 30 & mols$dl >= 0.18, ]
+
+print("活性成分总数目(包括重复的成分):", nrow(active_mols))
+
+# 按药材分组并统计活性成分数目
+herb_counts <- table(active_mols$herb_name)
+
+# 转换为数据框并排序（可选）
+herb_counts_df <- as.data.frame(herb_counts)
+names(herb_counts_df) <- c("药材", "活性成分数目")
+herb_counts_df <- herb_counts_df[order(-herb_counts_df$活性成分数目), ]
+
+# 输出结果
+print("药材活性成分统计:")
+herb_counts_df
+```
+
+### 2种以上药材共有的活性成分
+```{r}
+# 按成分名称分组，统计每个成分对应的药材数量和具体药材
+compound_herb_counts <- active_mols %>%
+  group_by(MOL_ID) %>%  # 同时按MOL_ID分，药材名称可能不同
+  summarise(
+    药材数量 = n_distinct(herb_name),
+    共有药材 = paste(unique(herb_name), collapse = ", "),
+    .groups = "drop"  # 避免dplyr警告
+  ) %>%
+  filter(药材数量 >= 2) %>%
+  arrange(desc(药材数量))  # 按共有药材数量降序排列
+
+# 输出结果
+print("多药材共有活性成分统计:")
+compound_herb_counts
+```
+
+### 活性成分的性质分布统计: 分子量、OB、DL
+```{r}
+# 确保active_mols中的记录是唯一的（基于MOL_ID 或 molecule_name）
+active_mols_unique <- active_mols %>%
+  distinct(MOL_ID, .keep_all = TRUE)
+
+print(paste("活性成分总数目(去除多种药材共有的重复成分):", nrow(active_mols_unique)))
+
+# 检查变量类型并转换为数值型
+active_mols_unique$mw <- as.numeric(as.character(active_mols_unique$mw))
+active_mols_unique$ob <- as.numeric(as.character(active_mols_unique$ob))
+active_mols_unique$dl <- as.numeric(as.character(active_mols_unique$dl))
+
+# 活性成分的性质分布统计
+property_stats <- active_mols_unique %>%
+  summarise(
+    # 分子量分布
+    mw_mean = mean(mw, na.rm = TRUE),
+    mw_median = median(mw, na.rm = TRUE),
+    mw_sd = sd(mw, na.rm = TRUE),
+    mw_min = min(mw, na.rm = TRUE),
+    mw_max = max(mw, na.rm = TRUE),
+    
+    # OB分布
+    ob_mean = mean(ob, na.rm = TRUE),
+    ob_median = median(ob, na.rm = TRUE),
+    ob_sd = sd(ob, na.rm = TRUE),
+    ob_min = min(ob, na.rm = TRUE),
+    ob_max = max(ob, na.rm = TRUE),
+    
+    # DL分布
+    dl_mean = mean(dl, na.rm = TRUE),
+    dl_median = median(dl, na.rm = TRUE),
+    dl_sd = sd(dl, na.rm = TRUE),
+    dl_min = min(dl, na.rm = TRUE),
+    dl_max = max(dl, na.rm = TRUE)
+  )
+
+print("活性成分性质分布统计:")
+print(property_stats)
+
+# 可选：可视化分布（需安装ggplot2）
+if (requireNamespace("ggplot2", quietly = TRUE)) {
+  library(ggplot2)
+}  
+
+# 分子量分布直方图
+p1 <- ggplot(active_mols_unique, aes(x = mw)) +
+  geom_histogram(bins = 30, fill = "skyblue", color = "black") +
+  labs(title = "活性成分分子量分布", x = "分子量", y = "频数")
+
+# OB分布直方图
+p2 <- ggplot(active_mols_unique, aes(x = ob)) +
+  geom_histogram(bins = 30, fill = "lightgreen", color = "black") +
+  labs(title = "活性成分OB值分布", x = "OB值", y = "频数")
+
+# DL分布直方图
+p3 <- ggplot(active_mols_unique, aes(x = dl)) +
+  geom_histogram(bins = 30, fill = "salmon", color = "black") +
+  labs(title = "活性成分DL值分布", x = "DL值", y = "频数")
+
+# 显示图形
+# print(p1)
+# print(p2)
+# print(p3)
+p1
+p2
+p3
+
+```
+
+### 活性成分靶点
+```{r}
+# 筛选活性成分靶点
+# 提取活性成分的MOL_ID列表
+active_mol_ids <- active_mols_unique$MOL_ID
+# 从靶点数据中筛选出活性成分对应的靶点
+active_targets <- targets[targets$MOL_ID %in% active_mol_ids, ]
+
+# 靶点统计
+
+# 活性成分靶点统计
+target_stats <- active_targets %>%
+  group_by(MOL_ID) %>%
+  summarise(
+    靶点数量 = n_distinct(target_name),
+    主要靶点 = paste(unique(target_name), collapse = ", "),
+    .groups = "drop"
+  )
+
+# 将靶点统计与活性成分信息合并
+active_mols_with_targets <- merge(
+  active_mols_unique, 
+  target_stats, 
+  by = "MOL_ID", 
+  all.x = TRUE
+)
+
+active_mols_with_targets
+
+# 靶点数量分布
+# p4 <- ggplot(active_mols_with_targets, aes(x = 靶点数量)) +
+#   geom_histogram(bins = min(10, length(unique(active_mols_with_targets$靶点数量))), 
+#                  fill = "purple", color = "black") +
+#   labs(title = "活性成分靶点数量分布", x = "靶点数量", y = "成分数量")
+# p4
+
+```
+
+### 没有靶点的成分列表
+```{r}
+compounds_without_targets <- active_mols_unique %>%
+    anti_join(active_targets, by = "MOL_ID")
+
+compounds_without_targets
+```
+
+### 有靶点的成分，靶点分类统计
+```{r}
+# 统计没有靶点的成分数量和有靶点的成分数量
+# 有靶点的成分及其验证靶点和预测靶点列出来
+# 没有靶点的成分列出，
+
+
+# 统计验证的靶点和预测的靶点数目
+validated_targets <- active_targets %>%
+  group_by(validated) %>%
+  summarise(
+    靶点数量 = n_distinct(target_ID),
+    成分数量 = n_distinct(MOL_ID),
+    .groups = "drop"
+  )
+
+validated_targets
+```
+
+## 下载活性成分的mol2文件
+
+### 定义下载函数
+```{r}
+
+# 批量下载函数
+download_tcmsp_mol2 <- function(mol_id, base_url, save_dir="./mol2") {
+  
+  # 保存路径（自动创建目录）
+  if (!dir.exists(save_dir)) dir.create(save_dir, recursive = TRUE)
+  
+  # 加载所需包（若未安装需先安装）
+  if (!require("httr")) install.packages("httr")
+  library(httr)
+  
+  # 下载链接前缀
+  base_url <- "https://www.tcmsp-e.com/tcmspmol/"
+  
+  # 构建完整下载链接
+  url <- paste0(base_url, mol_id, ".mol2")
+  
+  # 构建保存路径
+  file_path <- file.path(save_dir, paste0(mol_id, ".mol2"))
+  
+  # 下载文件（使用 httr 处理可能的重定向）
+  tryCatch({
+    response <- httr::GET(url)
+    if (response$status_code == 200) {
+      writeBin(httr::content(response, "raw"), file_path)
+      message(paste0("成功下载：", mol_id))
+    } else {
+      message(paste0("下载失败（状态码 ", response$status_code, "）：", mol_id))
+    }
+  }, error = function(e) {
+    message(paste0("下载出错：", mol_id, " - ", conditionMessage(e)))
+  })
+}
+
+```
+
+### 示例：下载mol2
+```{r}
+save_dir = "./data/hzwd/mol2"
+# 提取唯一的 MOL_ID
+mol_ids <- active_mols_unique$MOL_ID  # 替换为实际数据框中的 MOL_ID 列
+# 批量执行下载
+lapply(mol_ids, download_tcmsp_mol2, save_dir = save_dir)
+message("下载完成")
+```
+
+
+
+
+
+
