@@ -415,7 +415,136 @@ message("下载完成")
 ```
 
 
+## mol2 转 SMILES
 
+### 定义函数 batch_mol2_to_smiles
+```{r}
+# 批量mol2转SMILES的函数
+batch_mol2_to_smiles <- function(input, output_file = NULL, recursive = FALSE, verbose = TRUE) {
+  # 检查并安装必要的包
+  if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+  if (!requireNamespace("rcdk", quietly = TRUE))
+    BiocManager::install("rcdk")
+  library(rcdk)
+  
+  # 存储结果的数据框
+  results <- data.frame(
+    file_name = character(),
+    smiles = character(),
+    success = logical(),
+    message = character(),
+    stringsAsFactors = FALSE
+  )
+  
+  # 处理输入参数
+  file_list <- character()
+  
+  if (is.character(input) && length(input) == 1) {
+    # 输入是单个文件路径或目录
+    if (file.exists(input)) {
+      if (file.info(input)$isdir) {
+        # 处理目录
+        file_list <- list.files(
+          path = input, 
+          pattern = "\\.mol2$", 
+          full.names = TRUE, 
+          recursive = recursive
+        )
+        if (verbose) cat(paste("在目录中找到", length(file_list), "个mol2文件\n"))
+      } else {
+        # 处理单个文件
+        if (tolower(tools::file_ext(input)) == "mol2") {
+          file_list <- input
+        } else {
+          stop("输入的文件不是mol2格式")
+        }
+      }
+    } else {
+      stop("输入的文件或目录不存在")
+    }
+  } else if (is.character(input) && length(input) > 1) {
+    # 输入是多个文件路径
+    valid_files <- input[file.exists(input) & tolower(tools::file_ext(input)) == "mol2"]
+    if (length(valid_files) == 0) {
+      stop("没有找到有效的mol2文件")
+    }
+    if (length(valid_files) < length(input) && verbose) {
+      cat(paste("警告: 忽略了", length(input) - length(valid_files), "个无效文件\n"))
+    }
+    file_list <- valid_files
+  } else {
+    stop("输入参数格式不正确，请提供文件路径、目录路径或文件路径列表")
+  }
+  
+  # 检查是否有文件要处理
+  if (length(file_list) == 0) {
+    cat("没有找到mol2文件\n")
+    return(results)
+  }
+  
+  # 逐个处理文件
+  for (file_path in file_list) {
+    file_name <- basename(file_path)
+    if (verbose) cat(paste("处理文件:", file_name, "\n"))
+    
+    # 初始化结果
+    smiles <- NA
+    success <- FALSE
+    message <- ""
+    
+    # 尝试转换
+    tryCatch({
+      # 读取mol2文件
+      molecules <- read.molecules(file_path)
+      if (length(molecules) == 0) {
+        stop("无法读取分子结构")
+      }
+      
+      # 获取第一个分子（通常mol2文件只包含一个分子）
+      mol <- molecules[[1]]
+      
+      # 转换为SMILES
+      smiles <- get.smiles(mol)
+      success <- TRUE
+    }, error = function(e) {
+      message <- as.character(e$message)
+      if (verbose) cat(paste("错误:", message, "\n"))
+    })
+    
+    # 添加到结果数据框
+    results <- rbind(results, data.frame(
+      file_name = file_name,
+      smiles = ifelse(success, smiles, NA),
+      success = success,
+      message = ifelse(success, "成功", message),
+      stringsAsFactors = FALSE
+    ))
+  }
+  
+  # 保存结果到文件（如果指定）
+  if (!is.null(output_file)) {
+    write.csv(results, output_file, row.names = FALSE)
+    if (verbose) cat(paste("结果已保存到:", output_file, "\n"))
+  }
+  
+  return(results)
+}
+
+# 使用示例
+# 示例1: 处理单个文件
+single_result <- batch_mol2_to_smiles("path/to/your/molecule.mol2")
+print(single_result)
+
+# 示例2: 处理整个目录
+dir_results <- batch_mol2_to_smiles("path/to/mol2/directory", output_file = "conversion_results.csv")
+print(dir_results)
+
+# 示例3: 处理多个文件
+file_list <- c("file1.mol2", "file2.mol2", "subdir/file3.mol2")
+multi_results <- batch_mol2_to_smiles(file_list)
+print(multi_results)
+```
 
 
 
