@@ -1,0 +1,127 @@
+---
+title: "本草智鉴: 成分及其靶点数据"
+output: 
+  github_document
+---
+
+```{r setup, include=FALSE,warning = FALSE,message = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## 获取 TCMSP 成分及其靶点数据
+
+### 定义函数 `getTCMSpInfos`
+
+```{r}
+#' 获取 TCMSP 数据库中的药材成分及其靶点数据
+#' 
+#' @param herbs 字符向量，药材的中文名称向量
+#' @param token 字符串，TCMSP API的访问令牌，默认值为示例token（需确认有效性）
+#' @return 包含药材信息的数据框（若有多页结果则返回列表）
+#' @examples
+#' herbs <- c("黄芪","附子","白术","赤芍","茯苓","生姜")
+#' token <- 'b25dd6a212e8850feca0815bacbdf85a'
+#' tcmsp_info <- get_tcmsp_info(herbs,token)
+
+get_tcmsp_info <- function(herbs, token) {
+  
+  # 包加载与安装自动化
+  required_packages <- c("purrr", "httr", "rvest", "jsonlite", "dplyr", "stringr")
+  sapply(required_packages, function(pkg) {
+    if (!require(pkg, character.only = TRUE)) {
+      install.packages(pkg)
+      library(pkg, character.only = TRUE)
+    }
+  })
+  
+  # 定义TCMSP数据库URL
+  base_url <- 'https://tcmsp-e.com/tcmspsearch.php'
+  
+  # 批量处理药材并保存结果
+  results <- map(herbs, ~ {
+    Sys.sleep(2)  # 请求间隔
+    
+    # 1. 获取药材英文名
+    query_en <- modify_url(
+      url = base_url,
+      query = list(
+        qs = 'herb_all_name',
+        q = trimws(.x),
+        token = token
+      )
+    )
+    
+    # 提取药材信息
+    herb_info <- tryCatch({
+      read_html(query_en, encoding = 'UTF-8') %>%
+      html_elements("script") %>% 
+      html_text() %>% 
+      str_extract_all(.,"data:\\s\\[.*\\]") %>% 
+      unlist(.[9])  %>% 
+      str_replace("data:", "") %>%
+      trimws()
+    }, error = function(e) return("[]"))
+    
+    # 判断药材是否存在
+    if (herb_info == '[]') {
+      message('TCMSP数据库中 "', .x, '" 不存在')
+      return(list(herb_name = .x, mols = NULL, targets = NULL))
+    } else {
+      herb_info_df <- fromJSON(herb_info)
+      if (!(.x %in% herb_info_df$herb_cn_name)) {
+        message('TCMSP数据库中 "', .x, '" 不存在')
+        return(list(herb_name = .x, mols = NULL, targets = NULL))
+      } else {
+        herb_en_name <- herb_info_df$herb_en_name[.x == herb_info_df$herb_cn_name]
+        
+        # 2. 获取活性成分及靶点信息
+        query_url <- modify_url(
+          url = base_url,
+          query = list(
+            qr = herb_en_name,
+            qsr = 'herb_en_name',
+            token = token
+          )
+        )
+        
+        # 提取成分和靶点数据
+        herb_detail <- tryCatch({
+          read_html(query_url, encoding = 'UTF-8') %>%
+            html_elements("script") %>% 
+            html_text() %>% 
+            str_extract_all("data:\\s\\[.*\\]") %>% 
+            unlist(.[12])
+        }, error = function(e) return(character(0)))
+        
+        
+          # 解析活性成分
+          herb_mols <- herb_detail[1] %>% 
+            str_replace("data:", "") %>%
+            fromJSON()
+          
+          # 解析靶点
+          herb_mols_targets <- herb_detail[2] %>% 
+            str_replace("data:", "") %>%
+            fromJSON()
+          
+          # 添加药材名称作为标识列
+          if (!is.null(herb_mols)) {
+            herb_mols$herb_name <- .x
+          }
+          if (!is.null(herb_mols_targets)) {
+            herb_mols_targets$herb_name <- .x
+          }
+          
+          # 返回结构化结果
+          return(list(
+            herb_name = .x,
+            mols = herb_mols,
+            targets = herb_mols_targets
+          ))
+      }
+    }
+
+  }) # map 结束
+}
+
+```
